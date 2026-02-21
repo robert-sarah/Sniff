@@ -55,8 +55,30 @@ except ImportError:
 console = Console()
 
 # =============================================================================
-# SECTION: Constants & Traffic Classification
+# HYBRID ARCHITECTURE: STANDALONE + MODULAR
+# The script works as a single file but can use separate modules if present.
 # =============================================================================
+
+try: from modules.ui import show_banner, show_help, show_status
+except ImportError: pass
+
+try: from modules.interfaces import list_ifaces, start_mon, stop_mon
+except ImportError: pass
+
+try: from modules.scanner import wifi_scan, wps_audit
+except ImportError: pass
+
+try: from modules.sniffer import DeviceTracker, run_sniff
+except ImportError: pass
+
+try: from modules.port_scanner import run_port_scan
+except ImportError: pass
+
+try: from modules.wifi_ops import WiFiTactics
+except ImportError: pass
+
+try: from modules.cracker import audit_hash
+except ImportError: pass
 
 VOIP_PORTS = {5060, 5061, 3478, 3479, *range(16384, 32768)}
 VOIP_APP_PORTS = {
