@@ -20,8 +20,9 @@ from rich.text import Text
 from rich.progress import SpinnerColumn, Progress
 
 try:
-    from scapy.all import sniff as scapy_sniff, IP, TCP, UDP, DNS, Dot11, conf, wrpcap
+    from scapy.all import sniff as scapy_sniff, IP, TCP, UDP, DNS, Dot11, conf, wrpcap, EAPOL, RadioTap
     from scapy.utils import PcapWriter
+    import collections
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
@@ -77,7 +78,7 @@ class DeviceTracker:
         self.devices: dict[str, dict] = {}
         self.lock = threading.Lock()
 
-    def update(self, mac: str, ip: str, activity: str, bytes_count: int = 0):
+    def update(self, mac: str, ip: str, activity: str, bytes_count: int = 0, rssi: int = -100, is_handshake: bool = False, dst_ip: str | None = None):
         with self.lock:
             now = datetime.now()
             if mac not in self.devices:
@@ -94,6 +95,12 @@ class DeviceTracker:
                     "msg_packets": 0,
                     "voip_app": None,
                     "last_msg_time": 0,
+                    "rssi": rssi,
+                    "handshakes": 0,
+                    "destinations": set(),
+                    "activity_history": collections.deque([0] * 20, maxlen=20),
+                    "current_period_pkts": 0,
+                    "last_tick": time.time(),
                 }
             dev = self.devices[mac]
             dev["ip"] = ip
@@ -101,6 +108,26 @@ class DeviceTracker:
             dev["activities"][activity] += 1
             dev["total_packets"] += 1
             dev["total_bytes"] += bytes_count
+
+            # Update RSSI (keep strongest signal for accuracy)
+            if rssi != -100:
+                dev["rssi"] = max(dev["rssi"], rssi) if dev["rssi"] != -100 else rssi
+                
+            # Update Handshakes
+            if is_handshake:
+                dev["handshakes"] += 1
+                
+            # Update Destinations
+            if dst_ip and dst_ip != "255.255.255.255" and not dst_ip.startswith("224."):
+                dev["destinations"].add(dst_ip)
+
+            # Update Timeline Logic (1 second bins)
+            curr_time = time.time()
+            dev["current_period_pkts"] += 1
+            if curr_time - dev["last_tick"] >= 1.0:
+                dev["activity_history"].append(dev["current_period_pkts"])
+                dev["current_period_pkts"] = 0
+                dev["last_tick"] = curr_time
 
             # Update counts
             if activity == "📞 VoIP/Call":
@@ -216,14 +243,14 @@ def _build_dashboard(
         padding=(0, 1),
         expand=True,
     )
-    table.add_column("  MAC Address", style="cyan", width=20)
-    table.add_column("IP Address", style="green", width=16)
-    table.add_column("Appels", justify="right", style="bold green", width=10)
-    table.add_column("Messages", justify="right", style="bold blue", width=10)
-    table.add_column("App", style="yellow", width=12)
-    table.add_column("Activity", style="magenta", width=14)
+    table.add_column("  MAC Address", style="cyan", width=18)
+    table.add_column("PWR", justify="center", width=5)
+    table.add_column("Handshake", justify="center", style="bold yellow", width=10)
+    table.add_column("Appels", justify="right", style="bold green", width=8)
+    table.add_column("Messages", justify="right", style="bold blue", width=9)
+    table.add_column("Timeline", justify="center", width=12)
+    table.add_column("Destinations", style="dim", width=15)
     table.add_column("Packets", style="blue", justify="right", width=8)
-    table.add_column("Data", style="green", justify="right", width=10)
     table.add_column("Last Seen", style="dim", width=10)
 
     for mac, dev in sorted(snapshot.items(), key=lambda x: x[1]["total_packets"], reverse=True):
@@ -239,15 +266,36 @@ def _build_dashboard(
         voip_str = str(voip_count) if voip_count > 0 else "[dim]0[/]"
         msg_str = str(msg_count) if msg_count > 0 else "[dim]0[/]"
 
-        # App detection
-        voip_app = dev.get("voip_app", "") or ""
+        # RSSI Color
+        rssi = dev.get("rssi", -100)
+        rssi_style = "green" if rssi > -60 else "yellow" if rssi > -80 else "red"
+        rssi_str = f"[{rssi_style}]{rssi}[/]" if rssi != -100 else "[dim]?[/]"
+
+        # Handshake indicator
+        hs_count = dev.get("handshakes", 0)
+        hs_str = f"[bold yellow]YES ({hs_count})[/]" if hs_count > 0 else "[dim]—[/]"
+
+        # Timeline Sparkline-like bar
+        history = list(dev["activity_history"])
+        max_val = max(history) if any(history) else 1
+        timeline = ""
+        chars = " ▂▃▄▅▆▇█"
+        for val in history:
+            idx = int((val / max_val) * (len(chars) - 1))
+            timeline += chars[idx]
+        
+        # Destinations summary
+        dests = list(dev.get("destinations", []))
+        dest_str = dests[0] if dests else "—"
+        if len(dests) > 1:
+            dest_str += f" (+{len(dests)-1})"
 
         # Format data size
         total_bytes = dev["total_bytes"]
         if total_bytes > 1_000_000:
-            data_str = f"{total_bytes / 1_000_000:.1f} MB"
+            data_str = f"{total_bytes / 1_000_000:.1f} M"
         elif total_bytes > 1_000:
-            data_str = f"{total_bytes / 1_000:.1f} KB"
+            data_str = f"{total_bytes / 1_000:.1f} K"
         else:
             data_str = f"{total_bytes} B"
 
@@ -256,13 +304,13 @@ def _build_dashboard(
 
         table.add_row(
             f"  {mac}",
-            dev["ip"],
+            rssi_str,
+            hs_str,
             voip_str,
             msg_str,
-            voip_app,
-            main_activity,
+            f"[cyan]{timeline}[/]",
+            dest_str,
             str(dev["total_packets"]),
-            data_str,
             last,
         )
 
@@ -346,6 +394,17 @@ def start_sniffing(
         if stop_event.is_set():
             return
 
+        # Extract Physical Layer info (RSSI)
+        rssi = -100
+        if pkt.haslayer(RadioTap):
+            try:
+                rssi = pkt[RadioTap].dBm_AntSignal
+            except (AttributeError, TypeError):
+                pass
+
+        # Extract Handshake (EAPOL)
+        is_handshake = pkt.haslayer(EAPOL)
+
         mac = _get_mac(pkt)
         if not mac or mac == "FF:FF:FF:FF:FF:FF":
             return
@@ -354,13 +413,15 @@ def start_sniffing(
             return
 
         ip = "?"
+        dst_ip = None
         if pkt.haslayer(IP):
             ip = pkt[IP].src
+            dst_ip = pkt[IP].dst
 
         pkt_len = len(pkt) if pkt else 0
         activity, voip_app = classify_traffic(pkt)
 
-        tracker.update(mac, ip, activity, pkt_len)
+        tracker.update(mac, ip, activity, pkt_len, rssi, is_handshake, dst_ip)
 
         if voip_app:
             with tracker.lock:
@@ -482,11 +543,11 @@ def _print_summary(tracker: DeviceTracker):
         padding=(0, 1),
     )
     table.add_column("MAC", style="cyan", width=20)
-    table.add_column("IP", style="green", width=16)
-    table.add_column("Call", justify="center", width=6)
-    table.add_column("Msg", justify="center", width=6)
-    table.add_column("VoIP App", style="yellow", width=12)
-    table.add_column("Top Activity", style="magenta", width=14)
+    table.add_column("RSSI", justify="center", width=8)
+    table.add_column("Handshake", justify="center", width=12)
+    table.add_column("Appels", justify="center", width=8)
+    table.add_column("Messages", justify="center", width=8)
+    table.add_column("Destinations", style="dim", width=15)
     table.add_column("Total Packets", style="blue", justify="right", width=13)
 
     callers = 0
@@ -496,14 +557,17 @@ def _print_summary(tracker: DeviceTracker):
         
         voip_pkts = dev.get("voip_packets", 0)
         msg_pkts = dev.get("msg_packets", 0)
+        rssi = dev.get("rssi", -100)
+        hs = dev.get("handshakes", 0)
+        dests = len(dev.get("destinations", []))
 
         table.add_row(
             mac,
-            dev["ip"],
+            f"{rssi} dBm" if rssi != -100 else "Unknown",
+            f"YES ({hs})" if hs > 0 else "No",
             f"[bold green]{voip_pkts}[/]" if voip_pkts > 0 else "0",
             f"[bold blue]{msg_pkts}[/]" if msg_pkts > 0 else "0",
-            dev.get("voip_app", "") or "—",
-            main_activity,
+            f"{dests} unique IPs",
             str(dev["total_packets"]),
         )
 
