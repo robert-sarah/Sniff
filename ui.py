@@ -20,7 +20,7 @@ BANNER = r"""
   ██████   ██   ████ ██ ██      ██    
 [/]
 [dim bright_blue]  ─────────────────────────────────────[/]
-[bold white]  📡 Network Activity Monitor v1.0[/]
+[bold white]  SYSTEM: Network Activity Monitor v1.0[/]
 [dim]  Passive traffic analysis & VoIP detection[/]
 [dim bright_blue]  ─────────────────────────────────────[/]
 """
@@ -40,7 +40,7 @@ def show_banner():
 def show_help():
     """Display the help menu with all available commands."""
     table = Table(
-        title="🛠 Available Commands",
+        title="[HELP] Available Commands",
         title_style="bold cyan",
         border_style="bright_blue",
         header_style="bold white on #1a1a2e",
@@ -57,20 +57,20 @@ def show_help():
         ("monitor stop <iface>", "Disable monitor mode"),
         ("", ""),
         ("scan <iface> [duration]", "Scan for networks & devices"),
-        ("wps <iface> [duration]", "🔓 Scan for WPS-enabled networks"),
+        ("wps <iface> [duration]", "[WPS] Scan for WPS-enabled networks"),
         ("", ""),
-        ("arp scan [iface] [range]", "🌐 Map network (IP/MAC discovery)"),
-        ("arp spoof <iface> <target> <gw>", "☢ MITM: Redirect traffic to you"),
-        ("arp stop <target> <gw>", "🧹 Restore network ARP tables"),
+        ("arp scan [iface] [range]", "[NET] Map network (IP/MAC discovery)"),
+        ("arp spoof <iface> <target> <gw>", "[MITM] Redirect traffic to you"),
+        ("arp stop <target> <gw>", "[ARP] Restore network ARP tables"),
         ("", ""),
-        ("deauth <target> <ap> [count]", "💥 Kick device(s) from WiFi"),
-        ("beacon <ssid1> <ssid2>...", "🌀 Flood area with fake SSIDs"),
-        ("eviltwin <ssid> <mac> [target]", "🎭 Coordinate Evil Twin attack"),
-        ("stop_wifi", "🛑 Stop all active WiFi attacks"),
+        ("deauth <target> <ap> [count]", "[DEAUTH] Kick device(s) from WiFi"),
+        ("beacon <ssid1> <ssid2>...", "[BEACON] Flood area with fake SSIDs"),
+        ("eviltwin <ssid> <mac> [target]", "[EVIL] Coordinate Evil Twin attack"),
+        ("stop_wifi", "[STOP] Stop all active WiFi attacks"),
         ("", ""),
-        ("sniff <iface> [duration]", "📡 Start live traffic monitoring"),
+        ("sniff <iface> [duration]", "[SNIFF] Start live traffic monitoring"),
         ("sniff <iface> -m <mac>", "Monitor specific device and OS/Apps"),
-        ("crack <pcap> <wordlist>", "🗝 Audit Handshake strength"),
+        ("crack <pcap> <wordlist>", "[CRACK] Audit Handshake strength"),
         ("", ""),
         ("help", "Show this help menu"),
         ("clear", "Clear the screen"),
@@ -87,7 +87,6 @@ def show_help():
 
     console.print(
         Panel(
-            "[bold yellow]⚠ Legal Notice[/]\n\n"
             "This tool is for [bold]authorized network monitoring only[/].\n"
             "Only use on networks you own or have explicit permission to monitor.\n"
             "Traffic [bold green]content is never captured[/] — only metadata & activity type.",

