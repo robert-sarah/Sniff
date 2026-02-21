@@ -20,7 +20,8 @@ from rich.text import Text
 from rich.progress import SpinnerColumn, Progress
 
 try:
-    from scapy.all import sniff as scapy_sniff, IP, TCP, UDP, DNS, Dot11, conf, wrpcap, EAPOL, RadioTap
+    from scapy.all import sniff as scapy_sniff, IP, TCP, UDP, DNS, Dot11, conf, wrpcap, EAPOL, RadioTap, NBNSHeader, NBNSQueryRequest
+    from scapy.layers.tls.all import TLSClientHello
     from scapy.utils import PcapWriter
     import collections
     SCAPY_AVAILABLE = True
@@ -78,9 +79,10 @@ class DeviceTracker:
         self.devices: dict[str, dict] = {}
         self.lock = threading.Lock()
 
-    def update(self, mac: str, ip: str, activity: str, bytes_count: int = 0, rssi: int = -100, is_handshake: bool = False, dst_ip: str | None = None):
+    def update(self, mac: str, ip: str, activity: str, bytes_count: int = 0, rssi: int = -100, is_handshake: bool = False, dst_ip: str | None = None, hostname: str | None = None, ttl: int | None = None):
         with self.lock:
             now = datetime.now()
+            curr_time = time.time()
             if mac not in self.devices:
                 self.devices[mac] = {
                     "ip": ip,
@@ -101,6 +103,11 @@ class DeviceTracker:
                     "activity_history": collections.deque([0] * 20, maxlen=20),
                     "current_period_pkts": 0,
                     "last_tick": time.time(),
+                    "hostname": hostname,
+                    "os": "Unknown",
+                    "throughput_bytes": 0,
+                    "kbps": 0.0,
+                    "last_throughput_tick": time.time(),
                 }
             dev = self.devices[mac]
             dev["ip"] = ip
@@ -108,6 +115,24 @@ class DeviceTracker:
             dev["activities"][activity] += 1
             dev["total_packets"] += 1
             dev["total_bytes"] += bytes_count
+
+            # Update Hostname
+            if hostname:
+                dev["hostname"] = hostname
+
+            # OS Fingerprinting via TTL
+            if ttl:
+                if ttl <= 64: dev["os"] = "Linux/Android/iOS"
+                elif ttl <= 128: dev["os"] = "Windows"
+                elif ttl <= 255: dev["os"] = "Network Device"
+
+            # Update Throughput (kbps)
+            dev["throughput_bytes"] += bytes_count
+            duration = curr_time - dev["last_throughput_tick"]
+            if duration >= 1.0:
+                dev["kbps"] = (dev["throughput_bytes"] * 8) / (duration * 1000)
+                dev["throughput_bytes"] = 0
+                dev["last_throughput_tick"] = curr_time
 
             # Update RSSI (keep strongest signal for accuracy)
             if rssi != -100:
@@ -122,7 +147,6 @@ class DeviceTracker:
                 dev["destinations"].add(dst_ip)
 
             # Update Timeline Logic (1 second bins)
-            curr_time = time.time()
             dev["current_period_pkts"] += 1
             if curr_time - dev["last_tick"] >= 1.0:
                 dev["activity_history"].append(dev["current_period_pkts"])
@@ -243,14 +267,15 @@ def _build_dashboard(
         padding=(0, 1),
         expand=True,
     )
-    table.add_column("  MAC Address", style="cyan", width=18)
+    table.add_column("  Hostname / MAC", style="cyan", width=22)
+    table.add_column("OS", style="bold magenta", width=12)
+    table.add_column("DÉBIT", justify="right", style="bold yellow", width=10)
     table.add_column("PWR", justify="center", width=5)
-    table.add_column("Handshake", justify="center", style="bold yellow", width=10)
-    table.add_column("Appels", justify="right", style="bold green", width=8)
-    table.add_column("Messages", justify="right", style="bold blue", width=9)
+    table.add_column("HND", justify="center", width=4)
+    table.add_column("Appels", justify="right", style="bold green", width=7)
+    table.add_column("Messages", justify="right", style="bold blue", width=8)
     table.add_column("Timeline", justify="center", width=12)
     table.add_column("Destinations", style="dim", width=15)
-    table.add_column("Packets", style="blue", justify="right", width=8)
     table.add_column("Last Seen", style="dim", width=10)
 
     for mac, dev in sorted(snapshot.items(), key=lambda x: x[1]["total_packets"], reverse=True):
@@ -273,7 +298,7 @@ def _build_dashboard(
 
         # Handshake indicator
         hs_count = dev.get("handshakes", 0)
-        hs_str = f"[bold yellow]YES ({hs_count})[/]" if hs_count > 0 else "[dim]—[/]"
+        hs_str = "[bold yellow]✔[/]" if hs_count > 0 else "[dim]✘[/]"
 
         # Timeline Sparkline-like bar
         history = list(dev["activity_history"])
@@ -290,27 +315,29 @@ def _build_dashboard(
         if len(dests) > 1:
             dest_str += f" (+{len(dests)-1})"
 
-        # Format data size
-        total_bytes = dev["total_bytes"]
-        if total_bytes > 1_000_000:
-            data_str = f"{total_bytes / 1_000_000:.1f} M"
-        elif total_bytes > 1_000:
-            data_str = f"{total_bytes / 1_000:.1f} K"
-        else:
-            data_str = f"{total_bytes} B"
+        # Throughput
+        kbps = dev.get("kbps", 0.0)
+        throughput_str = f"{kbps:.1f} k" if kbps < 1000 else f"{kbps/1000:.1f} M"
+
+        # Hostname/MAC
+        host_mac = dev.get("hostname") or mac
+        
+        # OS
+        os_name = dev.get("os", "Unknown")
 
         # Last seen
         last = dev["last_seen"].strftime("%H:%M:%S")
 
         table.add_row(
-            f"  {mac}",
+            f"  {host_mac}",
+            os_name,
+            throughput_str,
             rssi_str,
             hs_str,
             voip_str,
             msg_str,
             f"[cyan]{timeline}[/]",
             dest_str,
-            str(dev["total_packets"]),
             last,
         )
 
@@ -414,14 +441,60 @@ def start_sniffing(
 
         ip = "?"
         dst_ip = None
+        ttl = None
+        hostname = None
         if pkt.haslayer(IP):
             ip = pkt[IP].src
             dst_ip = pkt[IP].dst
+            ttl = pkt[IP].ttl
+            
+        # Passive Hostname Discovery
+        if pkt.haslayer(UDP):
+            # mDNS / LLMNR / DNS
+            if pkt.haslayer(DNS):
+                dns = pkt[DNS]
+                # Check Queries
+                if dns.qdcount > 0 and isinstance(dns.qd, collections.abc.Iterable):
+                    for q in dns.qd:
+                        try:
+                            qname = q.qname.decode().strip(".")
+                            if ".local" in qname or ".lan" in qname or "google" not in qname:
+                                hostname = qname.split(".")[0]
+                        except: pass
+                # Check Answer RRs for reverse lookups or PTRs
+                if dns.ancount > 0 and isinstance(dns.an, collections.abc.Iterable):
+                    for a in dns.an:
+                         try:
+                             rdata = a.rdata.decode().strip(".")
+                             if ".local" in rdata or ".lan" in rdata:
+                                 hostname = rdata.split(".")[0]
+                         except: pass
+            # NBNS
+            elif pkt.haslayer(NBNSHeader):
+                if pkt.haslayer(NBNSQueryRequest):
+                    try:
+                        hostname = pkt[NBNSQueryRequest].QUESTION_NAME.decode().strip()
+                    except: pass
 
         pkt_len = len(pkt) if pkt else 0
         activity, voip_app = classify_traffic(pkt)
 
-        tracker.update(mac, ip, activity, pkt_len, rssi, is_handshake, dst_ip)
+        # Advanced App Detection via SNI (TLS)
+        if pkt.haslayer(TCP) and pkt.haslayer(TLSClientHello):
+             try:
+                 for ext in pkt[TLSClientHello].extensions:
+                     if ext.type == 0: # server_name
+                         sni = ext.server_names[0].data.decode()
+                         # Map SNIs to Apps
+                         if "netflix" in sni: voip_app = "Netflix"
+                         elif "tiktok" in sni: voip_app = "TikTok"
+                         elif "fbcdn" in sni or "facebook" in sni: voip_app = "Facebook"
+                         elif "instagram" in sni: voip_app = "Instagram"
+                         elif "snapchat" in sni: voip_app = "Snapchat"
+                         elif "youtube" in sni or "googlevideo" in sni: voip_app = "YouTube"
+             except: pass
+
+        tracker.update(mac, ip, activity, pkt_len, rssi, is_handshake, dst_ip, hostname, ttl)
 
         if voip_app:
             with tracker.lock:

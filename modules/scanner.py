@@ -18,6 +18,12 @@ from rich.live import Live
 from rich.layout import Layout
 from rich.text import Text
 
+try:
+    from scapy.all import sniff, Dot11Beacon, Dot11ProbeResp, Dot11Elt
+    SCAPY_AVAILABLE = True
+except ImportError:
+    SCAPY_AVAILABLE = False
+
 console = Console()
 
 
@@ -285,3 +291,47 @@ def scan_target(interface: str, bssid: str, channel: int, duration: int = 30):
     display_clients(clients)
 
     return access_points, clients
+
+
+def scan_wps(interface: str, duration: int = 15):
+    """
+    Scans for WPS-enabled networks by sniffing Beacon and Probe Response frames.
+    """
+    if not SCAPY_AVAILABLE:
+        console.print("[red]Scapy not found. WPS scan unavailable.[/]")
+        return
+
+    wps_aps = {} # bssid -> essid
+
+    def handle_packet(pkt):
+        if pkt.haslayer(Dot11Beacon) or pkt.haslayer(Dot11ProbeResp):
+            bssid = pkt[Dot11].addr3.upper()
+            if bssid in wps_aps:
+                return
+
+            # Look for WPS Vendor Extension (00:50:f2:04)
+            elt = pkt.getlayer(Dot11Elt)
+            while elt:
+                if elt.ID == 221 and elt.info.startswith(b'\x00P\xf2\x04'):
+                    # Found WPS!
+                    essid = pkt[Dot11Elt].info.decode(errors='ignore') if pkt.haslayer(Dot11Elt) else "<hidden>"
+                    wps_aps[bssid] = essid
+                    break
+                elt = elt.payload.getlayer(Dot11Elt)
+
+    console.print(f"[bold cyan]🔍 Scanning for WPS-enabled networks on [green]{interface}[/] ({duration}s)...[/]")
+    
+    sniff(iface=interface, prn=handle_packet, timeout=duration, store=False)
+
+    table = Table(title="🔓 WPS-Enabled Networks (Vulnerable)", title_style="bold yellow")
+    table.add_column("ESSID", style="green")
+    table.add_column("BSSID", style="cyan")
+    table.add_column("Status", style="red")
+
+    for bssid, essid in wps_aps.items():
+        table.add_row(essid or "<hidden>", bssid, "[bold red]VULNERABLE (WPS ON)[/]")
+    
+    if wps_aps:
+        console.print(table)
+    else:
+        console.print("[green]No WPS-enabled networks found (or couldn't detect them).[/]")

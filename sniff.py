@@ -31,8 +31,11 @@ from prompt_toolkit.completion import WordCompleter
 
 from ui import show_banner, show_help, show_status
 from modules.interfaces import list_interfaces, start_monitor, stop_monitor
-from modules.scanner import scan_networks, scan_target
+from modules.scanner import scan_networks, scan_target, scan_wps
 from modules.sniffer import start_sniffing
+from modules.network_audit import ARPAuditor
+from modules.wifi_ops import WiFiOperator
+from modules.portal import CaptivePortal
 
 console = Console()
 
@@ -40,8 +43,8 @@ console = Console()
 
 COMMANDS = [
     "interfaces", "monitor", "start", "stop",
-    "scan", "sniff", "help", "status",
-    "clear", "exit", "quit",
+    "scan", "wps", "sniff", "arp", "deauth", "beacon", "eviltwin", "stop_wifi", 
+    "help", "status", "clear", "exit", "quit",
 ]
 
 completer = WordCompleter(COMMANDS, ignore_case=True)
@@ -51,6 +54,9 @@ completer = WordCompleter(COMMANDS, ignore_case=True)
 state = {
     "monitor_iface": None,
     "base_iface": None,
+    "arp_auditor": None,
+    "wifi_ops": None,
+    "portal": None,
 }
 
 
@@ -164,6 +170,121 @@ def cmd_sniff(args: list[str]):
 
 # ─── Main Loop ──────────────────────────────────────────────────────────────
 
+def cmd_arp(args: list[str]):
+    """Handle ARP audit commands."""
+    if not args:
+        console.print("[yellow]Usage: arp scan [interface] [range][/]")
+        console.print("[yellow]       arp spoof <interface> <target_ip> <gateway_ip>[/]")
+        console.print("[yellow]       arp stop <target_ip> <gateway_ip>[/]")
+        return
+
+    subcmd = args[0].lower()
+    
+    if subcmd == "scan":
+        iface = args[1] if len(args) > 1 else (state["monitor_iface"] or state["base_iface"])
+        if not iface:
+            console.print("[red]Error: No interface specified or detected.[/]")
+            return
+        
+        if not state["arp_auditor"]:
+            state["arp_auditor"] = ARPAuditor(iface)
+        
+        ip_range = args[2] if len(args) > 2 else None
+        state["arp_auditor"].scan_network(ip_range)
+
+    elif subcmd == "spoof":
+        if len(args) < 4:
+            console.print("[yellow]Usage: arp spoof <interface> <target_ip> <gateway_ip>[/]")
+            return
+        
+        iface = args[1]
+        target_ip = args[2]
+        gateway_ip = args[3]
+
+        if not state["arp_auditor"] or state["arp_auditor"].interface != iface:
+            state["arp_auditor"] = ARPAuditor(iface)
+        
+        state["arp_auditor"].enable_ip_forwarding()
+        state["arp_auditor"].spoof_test(target_ip, gateway_ip)
+
+    elif subcmd == "stop":
+        if len(args) < 3:
+            console.print("[yellow]Usage: arp stop <target_ip> <gateway_ip>[/]")
+            return
+        
+        target_ip = args[1]
+        gateway_ip = args[2]
+
+        if state["arp_auditor"]:
+            state["arp_auditor"].stop_spoof_test(target_ip, gateway_ip)
+        else:
+            console.print("[red]Error: No active ARP auditor found.[/]")
+
+
+def cmd_wps(args: list[str]):
+    """Handle WPS scan command."""
+    if not args:
+        console.print("[yellow]Usage: wps <interface> [duration][/]")
+        return
+    iface = args[0]
+    duration = int(args[1]) if len(args) > 1 else 15
+    scan_wps(iface, duration)
+
+
+def cmd_wifi_ops(command: str, args: list[str]):
+    """Handle deauth and beacon commands."""
+    # Use monitor interface from state, otherwise error
+    iface = state["monitor_iface"]
+    if not iface:
+        console.print("[red]Error: You must start monitor mode first! ([bold]monitor start <iface>[/])[/]")
+        return
+
+    if not state["wifi_ops"] or state["wifi_ops"].interface != iface:
+        state["wifi_ops"] = WiFiOperator(iface)
+
+    if command == "deauth":
+        if len(args) < 2:
+            console.print("[yellow]Usage: deauth <target_mac> <gateway_mac> [count][/]")
+            return
+        target = args[0]
+        gateway = args[1]
+        count = int(args[2]) if len(args) > 2 else 0
+        state["wifi_ops"].deauth(target, gateway, count)
+
+    elif command == "beacon":
+        names = args if args else None
+        state["wifi_ops"].beacon_flood(names)
+
+    elif command == "eviltwin":
+        if len(args) < 2:
+            console.print("[yellow]Usage: eviltwin <ssid> <ap_mac> [target_client_mac][/]")
+            return
+        ssid = args[0]
+        ap_mac = args[1]
+        target_mac = args[2] if len(args) > 2 else None
+        
+        # 1. Start Cloner (and targeted Deauth if target_mac is set)
+        state["wifi_ops"].evil_twin(ssid, ap_mac, target_mac)
+        
+        # 2. Start Portal
+        if not state["portal"]:
+            state["portal"] = CaptivePortal()
+            state["portal"].start()
+        
+        if target_mac:
+            console.print(f"\n[bold green]⚡ AUTO-MODE:[/] Cloned [cyan]{ssid}[/] and kicking client [red]{target_mac}[/] automatically.")
+        else:
+            console.print("\n[bold cyan]💡 Next Step:[/] You should now run [bold red]deauth[/] on the real AP to force devices to switch to your clone.")
+            console.print(f"[dim]Example: deauth FF:FF:FF:FF:FF:FF {ap_mac}[/]")
+
+    elif command == "stop_wifi":
+        if state["wifi_ops"]:
+            state["wifi_ops"].stop()
+        if state["portal"]:
+            state["portal"].stop()
+            state["portal"] = None
+
+
 def main():
     # Check root on Linux
     if os.name != "nt" and os.geteuid() != 0:
@@ -230,8 +351,23 @@ def main():
             elif command == "scan":
                 cmd_scan(args)
 
+            elif command == "wps":
+                cmd_wps(args)
+
             elif command == "sniff":
                 cmd_sniff(args)
+
+            elif command == "arp":
+                cmd_arp(args)
+
+            elif command == "deauth":
+                cmd_wifi_ops("deauth", args)
+
+            elif command == "beacon":
+                cmd_wifi_ops("beacon", args)
+
+            elif command == "stop_wifi":
+                cmd_wifi_ops("stop_wifi", args)
 
             elif command == "status":
                 show_status(state["monitor_iface"], state["base_iface"])
