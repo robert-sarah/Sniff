@@ -64,6 +64,11 @@ DNS_PORTS = {53, 5353}
 
 SSH_PORTS = {22}
 
+# Messaging Detection (Heuristic)
+# Small TCP bursts to common SSL ports are often messages
+MESSAGING_THRESHOLD = 3   # Packets in a burst
+MESSAGING_WINDOW = 2      # Seconds
+
 
 class DeviceTracker:
     """Track per-device network activity."""
@@ -84,8 +89,11 @@ class DeviceTracker:
                     "total_packets": 0,
                     "total_bytes": 0,
                     "is_calling": False,
+                    "is_messaging": False,
                     "voip_packets": 0,
+                    "msg_packets": 0,
                     "voip_app": None,
+                    "last_msg_time": 0,
                 }
             dev = self.devices[mac]
             dev["ip"] = ip
@@ -94,17 +102,11 @@ class DeviceTracker:
             dev["total_packets"] += 1
             dev["total_bytes"] += bytes_count
 
-            # VoIP detection
+            # Update counts
             if activity == "📞 VoIP/Call":
                 dev["voip_packets"] += 1
-                dev["is_calling"] = dev["voip_packets"] > 5
-            else:
-                # Decay VoIP detection over time
-                elapsed = (now - dev["last_seen"]).total_seconds()
-                if elapsed > 10:
-                    dev["voip_packets"] = max(0, dev["voip_packets"] - 1)
-                    if dev["voip_packets"] < 3:
-                        dev["is_calling"] = False
+            elif activity == "💬 Message":
+                dev["msg_packets"] += 1
 
     def get_snapshot(self) -> dict:
         with self.lock:
@@ -158,8 +160,13 @@ def classify_traffic(pkt) -> tuple[str, str | None]:
     if ports & STREAMING_PORTS:
         return "🎬 Streaming", None
 
-    # Web / HTTPS
+    # Web / HTTPS / Messaging detection
     if ports & WEB_PORTS:
+        # Heuristic: Small packets on TCP 443 might be signaling/messaging
+        if pkt.haslayer(TCP):
+            payload_len = len(pkt[TCP].payload) if pkt[TCP].payload else 0
+            if 0 < payload_len < 500:
+                return "💬 Message", None
         return "🌐 Web/HTTPS", None
 
     # Email
@@ -211,7 +218,8 @@ def _build_dashboard(
     )
     table.add_column("  MAC Address", style="cyan", width=20)
     table.add_column("IP Address", style="green", width=16)
-    table.add_column("📞", justify="center", width=4)
+    table.add_column("Appels", justify="right", style="bold green", width=10)
+    table.add_column("Messages", justify="right", style="bold blue", width=10)
     table.add_column("App", style="yellow", width=12)
     table.add_column("Activity", style="magenta", width=14)
     table.add_column("Packets", style="blue", justify="right", width=8)
@@ -223,8 +231,13 @@ def _build_dashboard(
         activities = dev["activities"]
         main_activity = max(activities, key=activities.get) if activities else "?"
 
-        # Call indicator
-        call_indicator = "[bold green blink]● YES[/]" if dev["is_calling"] else "[dim]  —[/]"
+        # Get counters
+        voip_count = dev.get("voip_packets", 0)
+        msg_count = dev.get("msg_packets", 0)
+        
+        # Color coding for non-zero values
+        voip_str = str(voip_count) if voip_count > 0 else "[dim]0[/]"
+        msg_str = str(msg_count) if msg_count > 0 else "[dim]0[/]"
 
         # App detection
         voip_app = dev.get("voip_app", "") or ""
@@ -244,7 +257,8 @@ def _build_dashboard(
         table.add_row(
             f"  {mac}",
             dev["ip"],
-            call_indicator,
+            voip_str,
+            msg_str,
             voip_app,
             main_activity,
             str(dev["total_packets"]),
@@ -469,7 +483,8 @@ def _print_summary(tracker: DeviceTracker):
     )
     table.add_column("MAC", style="cyan", width=20)
     table.add_column("IP", style="green", width=16)
-    table.add_column("Was Calling?", justify="center", width=13)
+    table.add_column("Call", justify="center", width=6)
+    table.add_column("Msg", justify="center", width=6)
     table.add_column("VoIP App", style="yellow", width=12)
     table.add_column("Top Activity", style="magenta", width=14)
     table.add_column("Total Packets", style="blue", justify="right", width=13)
@@ -478,15 +493,15 @@ def _print_summary(tracker: DeviceTracker):
     for mac, dev in sorted(snapshot.items(), key=lambda x: x[1]["total_packets"], reverse=True):
         activities = dev["activities"]
         main_activity = max(activities, key=activities.get) if activities else "?"
-        was_calling = dev.get("is_calling", False) or dev.get("voip_packets", 0) > 5
-
-        if was_calling:
-            callers += 1
+        
+        voip_pkts = dev.get("voip_packets", 0)
+        msg_pkts = dev.get("msg_packets", 0)
 
         table.add_row(
             mac,
             dev["ip"],
-            "[bold green]✔ YES[/]" if was_calling else "[dim]✘ No[/]",
+            f"[bold green]{voip_pkts}[/]" if voip_pkts > 0 else "0",
+            f"[bold blue]{msg_pkts}[/]" if msg_pkts > 0 else "0",
             dev.get("voip_app", "") or "—",
             main_activity,
             str(dev["total_packets"]),
